@@ -4,10 +4,12 @@ import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.Matrix;
 import android.media.Image;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.provider.MediaStore;
 import android.widget.Button;
 import android.widget.ImageView;
@@ -22,10 +24,13 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.content.FileProvider;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.exifinterface.media.ExifInterface;
 
+import com.google.android.datatransport.runtime.BuildConfig;
 import com.google.android.gms.tasks.OnFailureListener;
 import com.google.android.gms.tasks.OnSuccessListener;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
@@ -35,17 +40,27 @@ import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+
 public class MainActivity extends AppCompatActivity {
 
     ImageView imgView;
 
+
+
     private Bitmap ultimaImagemProcessada = null;
+
     private String txtExtraido = "";
 
     private TextView extractView;
 
     private TextRecognizer textRecognizer;
-
+    //private Uri fotoUri;
     private final ActivityResultLauncher<String> launcherGaleria = registerForActivityResult(
             new ActivityResultContracts.GetContent(),this::processarImagemSelecionada
     );
@@ -53,6 +68,8 @@ public class MainActivity extends AppCompatActivity {
     private final ActivityResultLauncher<Intent> launcherCamerea = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),this::processarFotoTirada
     );
+
+    private Uri fotoUri;
     private static final int REQ_CAMERA = 1001;
     private static final int REQ_READ_IMAGES = 1002;
     private static final int REQ_WRITE_STORAGE = 1003;
@@ -66,6 +83,7 @@ public class MainActivity extends AppCompatActivity {
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom);
             return insets;
         });
+
          FloatingActionButton btnCamera = findViewById(R.id.captureButton);
          FloatingActionButton btnGalery = findViewById(R.id.captureGalery);
          imgView = findViewById(R.id.imageView);
@@ -99,13 +117,37 @@ public class MainActivity extends AppCompatActivity {
     private void abrirCamera() {
         Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
 
-        try {
-            launcherCamerea.launch(intent);
+        // Criar um arquivo temporário para salvar a imagem
+        File photoFile = criarArquivoImagem();
+        if (photoFile != null) {
+            fotoUri = FileProvider.getUriForFile(this,
+                    "com.example.ocrreader.fileprovider",
+                    photoFile);
+            intent.putExtra(MediaStore.EXTRA_OUTPUT, fotoUri);
 
-        }catch (Exception e){
-            Toast.makeText(this, "Não foi possivel abrir a Câmera "+ e.getMessage(), Toast.LENGTH_SHORT).show();
+            try {
+                launcherCamerea.launch(intent);
+            } catch (Exception e) {
+                Toast.makeText(this, "Não foi possível abrir a Câmera: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+            }
+        } else {
+            Toast.makeText(this, "Não foi possível criar o arquivo para a imagem", Toast.LENGTH_SHORT).show();
         }
     }
+
+    private File criarArquivoImagem() {
+        try {
+            String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
+            String imageFileName = "JPEG_" + timeStamp + "_";
+            File storageDir = getExternalFilesDir(Environment.DIRECTORY_PICTURES);
+            return File.createTempFile(imageFileName, ".jpg", storageDir);
+        } catch (IOException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+
 
     private void abrirGaleria() {
 //        if(Build.VERSION.SDK_INT>=33){
@@ -115,34 +157,77 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void processarFotoTirada(ActivityResult activityResult) {
-        if (activityResult == null || activityResult.getData() == null){
+        if (activityResult.getResultCode() != RESULT_OK || fotoUri == null) {
             Toast.makeText(this, "Operação cancelada", Toast.LENGTH_SHORT).show();
             return;
         }
-        Bitmap thumbnail = (Bitmap) activityResult.getData().getExtras().get("data");
 
-        if(thumbnail == null){
-            Toast.makeText(this, "Câmera não retornou a imagem", Toast.LENGTH_SHORT).show();
-            return;
+        try {
+            // Obter o Bitmap a partir do Uri
+            Bitmap bitmap = MediaStore.Images.Media.getBitmap(getContentResolver(), fotoUri);
+
+            // Aplicar rotação com base nos metadados EXIF
+            int rotation = getRotationFromExif(fotoUri);
+            ultimaImagemProcessada = applyRotation(bitmap, rotation);
+
+            // Exibir a imagem corrigida
+            imgView.setImageBitmap(ultimaImagemProcessada);
+
+            // Extrair texto da imagem
+            extrairTexto(ultimaImagemProcessada);
+
+        } catch (Exception e) {
+            Toast.makeText(this, "Erro ao processar a imagem: " + e.getMessage(), Toast.LENGTH_SHORT).show();
         }
-
-        ultimaImagemProcessada = thumbnail; // ou bitmap, no caso da galeria
-
-        imgView.setImageBitmap(thumbnail);
-
-        extrairTexto(ultimaImagemProcessada);
     }
+
+
+
+    private int getRotationFromExif(@NonNull Uri uri) {
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) return 0;
+            ExifInterface exif = new ExifInterface(in);
+            int orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+            switch (orientation) {
+
+                case ExifInterface.ORIENTATION_ROTATE_90: return 90;
+                case ExifInterface.ORIENTATION_ROTATE_180: return 180;
+                case ExifInterface.ORIENTATION_ROTATE_270: return 270;
+                default: return 0;
+            }
+        } catch (Exception e) {
+            return 0; // Se houver erro, assume que não há rotação.
+        }
+    }
+
+    private Bitmap applyRotation(Bitmap src, int degrees) {
+        if (degrees == 0 || src == null) return src;
+        Matrix matrix = new Matrix();
+        matrix.postRotate(degrees);
+        return Bitmap.createBitmap(src, 0, 0, src.getWidth(), src.getHeight(), matrix, true);
+    }
+
+
 
     private void processarImagemSelecionada(Uri uri) {
         if(uri == null) return;
 
         try {
             Bitmap bitmap = MediaStore.Images.Media.getBitmap(getContentResolver(), uri);
-            imgView.setImageBitmap(bitmap);
+
             //rotularBitmap(bitmap);
 
-            ultimaImagemProcessada = bitmap; // ou bitmap, no caso da galeriae
+            // Lê os metadados EXIF da imagem para descobrir sua orientação (se foi tirada de lado, etc.).
+            int rotation = getRotationFromExif(uri);
+            // Aplica a rotação para que a imagem fique "em pé".
+            ultimaImagemProcessada = applyRotation(bitmap, rotation);
+           // ultimaImagemProcessada = bitmap; // ou bitmap, no caso da galeriae
+            imgView.setImageBitmap(ultimaImagemProcessada);
+
             extrairTexto(ultimaImagemProcessada);
+
+
+
 
 
         }catch (Exception e){
