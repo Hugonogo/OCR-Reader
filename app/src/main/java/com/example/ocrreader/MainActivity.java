@@ -1,17 +1,16 @@
 package com.example.ocrreader;
 
 import android.Manifest;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Matrix;
-import android.media.Image;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
-import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -30,10 +29,15 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.exifinterface.media.ExifInterface;
 
-import com.google.android.datatransport.runtime.BuildConfig;
 import com.google.android.gms.tasks.OnFailureListener;
 import com.google.android.gms.tasks.OnSuccessListener;
+import com.google.android.material.button.MaterialButton;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
+import com.google.mlkit.common.model.DownloadConditions;
+import com.google.mlkit.nl.translate.TranslateLanguage;
+import com.google.mlkit.nl.translate.Translation;
+import com.google.mlkit.nl.translate.Translator;
+import com.google.mlkit.nl.translate.TranslatorOptions;
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.Text;
 import com.google.mlkit.vision.text.TextRecognition;
@@ -43,9 +47,13 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+
+//import com.google.mlkit.nl.translate.Translator;
+
 
 public class MainActivity extends AppCompatActivity {
 
@@ -69,6 +77,29 @@ public class MainActivity extends AppCompatActivity {
             new ActivityResultContracts.StartActivityForResult(),this::processarFotoTirada
     );
 
+    private final ActivityResultLauncher<Intent> launcherSalvar =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == RESULT_OK && result.getData() != null) {
+                    Uri uri = result.getData().getData();
+                    if (uri != null) {
+                        try {
+                            OutputStream outputStream = getContentResolver().openOutputStream(uri);
+                            if (outputStream != null) {
+                                outputStream.write(extractView.getText().toString().getBytes());
+                                outputStream.close();
+                                mostrarToast("Arquivo salvo com sucesso!");
+                            }
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                            mostrarToast("Erro ao salvar: "+ e.getMessage());
+                        }
+                    }
+                }
+            });
+
+
+
+
     private Uri fotoUri;
     private static final int REQ_CAMERA = 1001;
     private static final int REQ_READ_IMAGES = 1002;
@@ -86,8 +117,14 @@ public class MainActivity extends AppCompatActivity {
 
          FloatingActionButton btnCamera = findViewById(R.id.captureButton);
          FloatingActionButton btnGalery = findViewById(R.id.captureGalery);
+         FloatingActionButton btnTranslate = findViewById(R.id.translateButton);
          imgView = findViewById(R.id.imageView);
          extractView = findViewById(R.id.extractedTextView);
+        MaterialButton btnShare = findViewById(R.id.shareButton);
+        MaterialButton btnCopy = findViewById(R.id.copyButton);
+        MaterialButton btnSave = findViewById(R.id.saveButton);
+
+
 
         btnCamera.setOnClickListener(v -> {
             checarOuAbrirCamera();
@@ -97,7 +134,42 @@ public class MainActivity extends AppCompatActivity {
             abrirGaleria();
         });
 
+        btnShare.setOnClickListener(v -> compartilharResultados());
+
+        btnCopy.setOnClickListener(v -> copiarTexto(extractView.getText().toString()));
+
+        btnSave.setOnClickListener(v -> {
+            escolherPastaESalvar(extractView.getText().toString());
+        });
+
+        btnTranslate.setOnClickListener(v -> translateTxt(extractView.getText().toString()));
+
         textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+
+
+    }
+
+    private void translateTxt(String txt) {
+
+        if (txt == null || txt.trim().isEmpty() || txt.equals("Texto extraído aparecerá aqui")) {
+            mostrarToast("Nada para traduzir");
+            return;
+        }
+
+        TranslatorOptions options = new TranslatorOptions.Builder()
+                .setSourceLanguage(TranslateLanguage.ENGLISH).setTargetLanguage(TranslateLanguage.PORTUGUESE).build();
+
+        final Translator translator = Translation.getClient(options);
+
+        DownloadConditions conditions = new DownloadConditions.Builder().requireWifi().build();
+
+        translator.downloadModelIfNeeded(conditions).addOnSuccessListener(unused -> {
+            translator.translate(txt).addOnSuccessListener(traString ->{
+                extractView.setText(traString);
+                mostrarToast("Tradução Concluida");
+            }).addOnFailureListener(e -> {mostrarToast("erro na Tradução "+ e.getMessage());
+            });
+        }).addOnFailureListener(e -> mostrarToast("Erro ao fazer download do modelo"));
 
 
     }
@@ -264,4 +336,66 @@ public class MainActivity extends AppCompatActivity {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
 
     }
+
+    private void compartilharResultados() {
+        if (ultimaImagemProcessada == null || extractView.getText().toString().isEmpty()){
+            Toast.makeText(this, "Nenhum resultado para compartilhar", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        try {
+            String path =  MediaStore.Images.Media.insertImage(
+                    getContentResolver(), ultimaImagemProcessada, "resultado_rotulos", null
+            );
+
+            Uri uri  =  Uri.parse(path);
+
+            String mensagem = "Resultados da análise:\n\n" + extractView.getText().toString();
+
+            Intent shareIntent  = new Intent(Intent.ACTION_SEND);
+
+            shareIntent.setType("image/*");
+            shareIntent.putExtra(Intent.EXTRA_TEXT, mensagem);
+            shareIntent.putExtra(Intent.EXTRA_STREAM, uri);
+            shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+            startActivity(Intent.createChooser(shareIntent, "Compartilhar Com:"));
+        }catch (Exception e){
+
+        }
+
+
+
+    }
+
+    private void copiarTexto(String textoCopiado){
+
+
+        if (textoCopiado == null || textoCopiado.trim().isEmpty()|| textoCopiado.equals("Texto extraído aparecerá aqui")){
+            mostrarToast("Nada para Copiar");
+            return;
+
+        }
+
+
+        ClipboardManager clipBoard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+
+        clipBoard.setPrimaryClip(ClipData.newPlainText("", textoCopiado));
+        mostrarToast("Texto Copiado");
+
+    }
+    private void escolherPastaESalvar(String conteudo) {
+        if (conteudo == null || conteudo.trim().isEmpty()|| conteudo.equals("Texto extraído aparecerá aqui")){
+            mostrarToast("Nada para salvar");
+            return;
+
+        }
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_TITLE, "arquivo.txt");
+        launcherSalvar.launch(intent);
+    }
+
+
 }
